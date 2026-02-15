@@ -1,2 +1,276 @@
-<p> This is a new repo.</p>
-<p>This is a new feature</p>
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PS2 – Smart Business Assistant</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<h1>PS2 Dashboard</h1>
+<p>If you see this, HTML is working.</p>
+
+<!-- ================= FIREBASE + LOGIC ================= -->
+<script type="module">
+  /* ---------- Firebase Imports ---------- */
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.8.0/firebase-app.js";
+  import {
+    getFirestore,
+    collection,
+    getDocs,
+    addDoc,
+    query,
+    where,
+    updateDoc,
+    doc,
+    serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/12.8.0/firebase-firestore.js";
+
+  /* ---------- Firebase Config ---------- */
+  const firebaseConfig = {
+    apiKey: "AIzaSyBsHHkSo0gOoHEccbFc_4QNIcWWiTLV_W4",
+    authDomain: "ps2neurathon.firebaseapp.com",
+    projectId: "ps2neurathon",
+    storageBucket: "ps2neurathon.firebasestorage.app",
+    messagingSenderId: "398138241366",
+    appId: "1:398138241366:web:cfd9fd0444a8501af766f7"
+  };
+
+  /* ---------- Initialize Firebase ---------- */
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  /* =====================================================
+     INVENTORY
+  ===================================================== */
+
+  async function loadInventory() {
+    const list = document.getElementById("inventoryList");
+    list.innerHTML = "";
+
+    const snapshot = await getDocs(collection(db, "inventory"));
+    snapshot.forEach(docSnap => {
+      const d = docSnap.data();
+      const warn = d.quantity <= 20 ? " ⚠️ LOW STOCK" : "";
+      list.innerHTML += `<li>${d.item_name} – ${d.quantity}${warn}</li>`;
+    });
+  }
+
+  async function addItem() {
+    const name = itemName.value.trim().toLowerCase();
+    const qty = Number(itemQty.value);
+
+    if (!name || !qty) return alert("Enter name & quantity");
+
+    const q = query(collection(db, "inventory"), where("item_name", "==", name));
+    const snap = await getDocs(q);
+
+    if (!snap.empty) {
+      snap.forEach(async d =>
+        updateDoc(doc(db, "inventory", d.id), {
+          quantity: d.data().quantity + qty
+        })
+      );
+    } else {
+      await addDoc(collection(db, "inventory"), {
+        item_name: name,
+        quantity: qty
+      });
+    }
+    loadInventory();
+  }
+
+  /* =====================================================
+     ORDERS + SALES
+  ===================================================== */
+
+  async function placeOrder() {
+    const name = orderItem.value.trim().toLowerCase();
+    const qty = Number(orderQty.value);
+
+    if (!name || !qty) return;
+
+    const q = query(collection(db, "inventory"), where("item_name", "==", name));
+    const snap = await getDocs(q);
+
+    if (snap.empty) {
+      orderStatus.innerText = "Item not found";
+      return;
+    }
+
+    snap.forEach(async d => {
+      if (d.data().quantity < qty) {
+        orderStatus.innerText = "Not enough stock";
+        return;
+      }
+
+      await updateDoc(doc(db, "inventory", d.id), {
+        quantity: d.data().quantity - qty
+      });
+
+      await addDoc(collection(db, "sales"), {
+        item_name: name,
+        quantity: qty,
+        timestamp: serverTimestamp()
+      });
+
+      orderStatus.innerText = "Order placed";
+      loadInventory();
+    });
+  }
+
+  async function loadSales() {
+    salesList.innerHTML = "";
+    const snap = await getDocs(collection(db, "sales"));
+    snap.forEach(d =>
+      salesList.innerHTML += `<li>${d.data().item_name} – ${d.data().quantity}</li>`
+    );
+  }
+
+  /* =====================================================
+     ANALYTICS + CHARTS
+  ===================================================== */
+
+  let chart = null; // SINGLE chart reference (important)
+
+  async function loadSalesAnalytics() {
+    const snap = await getDocs(collection(db, "sales"));
+
+    let totalOrders = 0;
+    let totalQty = 0;
+    const items = {};
+
+    snap.forEach(d => {
+      totalOrders++;
+      totalQty += d.data().quantity;
+      items[d.data().item_name] = (items[d.data().item_name] || 0) + d.data().quantity;
+    });
+
+    totalOrdersEl.innerText = totalOrders;
+    totalQuantity.innerText = totalQty;
+    topItem.innerText = Object.keys(items).reduce((a,b)=>items[a]>items[b]?a:b,"None");
+
+    drawItemChart(items);
+  }
+
+  function drawItemChart(items) {
+    if (chart) chart.destroy();
+
+    chart = new Chart(salesChart, {
+      type: "bar",
+      data: {
+        labels: Object.keys(items),
+        datasets: [{
+          label: "Units Sold",
+          data: Object.values(items),
+          backgroundColor: "#2196F3"
+        }]
+      },
+      options: { responsive: true }
+    });
+  }
+
+  async function loadDailyWeeklyChart() {
+    const snap = await getDocs(collection(db, "sales"));
+    let today = 0, week = 0;
+
+    const now = new Date();
+    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startWeek = new Date(now);
+    startWeek.setDate(now.getDate() - 6);
+
+    snap.forEach(d => {
+      if (!d.data().timestamp) return;
+      const t = d.data().timestamp.toDate();
+      if (t >= startToday) today += d.data().quantity;
+      if (t >= startWeek) week += d.data().quantity;
+    });
+
+    if (chart) chart.destroy();
+    chart = new Chart(salesChart, {
+      type: "bar",
+      data: {
+        labels: ["Today", "Last 7 Days"],
+        datasets: [{
+          label: "Sales",
+          data: [today, week],
+          backgroundColor: ["#4CAF50", "#FF9800"]
+        }]
+      }
+    });
+  }
+
+
+async function exportSalesToCSV() {
+  const snapshot = await getDocs(collection(db, "sales"));
+
+  let csv = "date,quantity\n";
+
+  snapshot.forEach(docSnap => {
+    const d = docSnap.data();
+    if (!d.timestamp) return;
+
+    const date = d.timestamp.toDate().toISOString().split("T")[0];
+    csv += `${date},${d.quantity}\n`;
+  });
+
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "firebase_sales_data.csv";
+  a.click();
+}
+
+
+
+  /* ---------- Expose Buttons ---------- */
+  window.loadInventory = loadInventory;
+  window.addItem = addItem;
+  window.placeOrder = placeOrder;
+  window.loadSales = loadSales;
+  window.loadSalesAnalytics = loadSalesAnalytics;
+  window.loadDailyWeeklyChart = loadDailyWeeklyChart;
+  window.exportSalesToCSV = exportSalesToCSV;
+
+
+  loadInventory();
+</script>
+
+<!-- ================= UI ================= -->
+
+<h2>Inventory</h2>
+<button onclick="loadInventory()">Load Inventory</button><br><br>
+<input id="itemName" placeholder="Item name">
+<input id="itemQty" type="number" placeholder="Qty">
+<button onclick="addItem()">Add Item</button>
+<ul id="inventoryList"></ul>
+
+<h2>Place Order</h2>
+<input id="orderItem">
+<input id="orderQty" type="number">
+<button onclick="placeOrder()">Place Order</button>
+<p id="orderStatus"></p>
+
+<h2>Sales History</h2>
+<button onclick="loadSales()">Load Sales</button>
+<ul id="salesList"></ul>
+
+<h2>Sales Analytics</h2>
+<button onclick="loadSalesAnalytics()">Load Analytics</button>
+<p>Total Orders: <span id="totalOrdersEl">0</span></p>
+<p>Total Quantity: <span id="totalQuantity">0</span></p>
+<p>Top Item: <span id="topItem">None</span></p>
+
+<button onclick="loadDailyWeeklyChart()">Daily vs Weekly</button>
+<canvas id="salesChart"></canvas>
+
+<button onclick="exportSalesToCSV()">Export Sales CSV</button>
+
+
+
+</body>
+</html>
+
+
+
